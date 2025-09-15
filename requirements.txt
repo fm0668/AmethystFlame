@@ -1,0 +1,40 @@
+# 交易所接口
+ccxt==4.2.85
+
+# WebSocket连接
+websockets==12.0
+
+# HTTP异步请求
+aiohttp==3.9.3
+
+# 异步编程（Python 3.7+内置，但保留以确保兼容性）
+asyncio==3.4.3
+
+# 环境变量管理
+python-dotenv==1.0.0
+
+# 数据处理和分析
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 定时任务调度
+schedule==1.2.0
+
+# 日志记录（Python内置，但某些版本可能需要）
+# logging - 内置模块
+
+# 数学计算（Python内置）
+# math - 内置模块
+
+# 系统操作（Python内置）
+# os - 内置模块
+# sys - 内置模块
+# time - 内置模块
+# json - 内置模块
+# hmac - 内置模块
+# hashlib - 内置模块
+# uuid - 内置模块
+# warnings - 内置模块
+# datetime - 内置模块
+# typing - 内置模块
+# dataclasses - 内置模块
