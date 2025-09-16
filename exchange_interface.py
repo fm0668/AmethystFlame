@@ -7,6 +7,7 @@
 
 import ccxt
 import uuid
+import time
 import logging
 from config import config
 
@@ -24,6 +25,9 @@ class ExchangeInterface:
     
     def __init__(self):
         self.exchange = None
+        self.websocket_price = None  # WebSocket实时价格
+        self.last_valid_price = None  # 最后有效价格
+        self.last_price_update_time = 0  # 最后价格更新时间
         self.price_precision = None
         self.amount_precision = None
         self.min_order_amount = None
@@ -110,7 +114,14 @@ class ExchangeInterface:
                 # 启用双向持仓模式
                 params = {'dualSidePosition': 'true'}
                 self.exchange.fapiPrivatePostPositionSideDual(params)
-                logger.info("双向持仓模式已启用")
+                
+                # 二次验证
+                position_mode = self.exchange.fetch_position_mode(symbol=config.get_ccxt_symbol())
+                if not position_mode['hedged']:
+                    logger.error("启用双向持仓模式失败，请手动启用双向持仓模式后再运行程序。")
+                    raise Exception("启用双向持仓模式失败，请手动启用双向持仓模式后再运行程序。")
+                else:
+                    logger.info("双向持仓模式已成功启用")
             else:
                 logger.info("双向持仓模式已启用")
                 
@@ -118,7 +129,7 @@ class ExchangeInterface:
             
         except Exception as e:
             logger.error(f"检查/启用双向持仓模式失败: {e}")
-            return False
+            raise e  # 抛出异常，停止程序
     
     def get_listen_key(self):
         """获取listenKey用于WebSocket连接"""
@@ -279,6 +290,67 @@ class ExchangeInterface:
             logger.error(f"获取K线数据失败: {e}")
             return []
     
+    def get_ticker(self, symbol=None):
+        """获取ticker价格信息 - 混合策略"""
+        try:
+            # 优先使用WebSocket实时价格
+            if self.websocket_price and self._validate_price(self.websocket_price):
+                logger.debug(f"使用WebSocket价格: {self.websocket_price}")
+                return {'price': self.websocket_price}
+            
+            # 备用REST API
+            if symbol is None:
+                symbol = config.get_ccxt_symbol()
+            
+            # 使用ccxt获取ticker数据
+            ticker = self.exchange.fetch_ticker(symbol)
+            
+            # 验证ticker数据的有效性
+            if not ticker or 'last' not in ticker:
+                logger.error(f"获取到无效的ticker数据: {ticker}")
+                return {'price': self.last_valid_price}  # 返回最后有效价格
+            
+            price = ticker.get('last')  # 最新成交价
+            if not self._validate_price(price):
+                logger.error(f"获取到无效的价格: {price}")
+                return {'price': self.last_valid_price}  # 返回最后有效价格
+            
+            # 更新价格缓存
+            self.update_price_cache(price)
+            logger.debug(f"成功获取REST API价格: {price}")
+            return {'price': price}
+            
+        except Exception as e:
+            logger.error(f"获取ticker失败: {e}")
+            return {'price': self.last_valid_price}  # 返回最后有效价格
+
+    def _validate_price(self, price):
+        """简化的价格验证"""
+        if price is None or price <= 0:
+            return False
+        
+        # 只做基本的合理性检查，避免过度验证
+        if self.last_valid_price:
+            # 价格变动超过10%才认为异常
+            change_ratio = abs(price - self.last_valid_price) / self.last_valid_price
+            if change_ratio > 0.1:
+                logger.warning(f"价格变动异常: {self.last_valid_price} -> {price}")
+                return False
+        
+        return True
+
+    def update_price_cache(self, price):
+        """更新价格缓存"""
+        if self._validate_price(price):
+            self.last_valid_price = price
+            self.last_price_update_time = time.time()
+
+    def update_websocket_price(self, price):
+        """更新WebSocket价格"""
+        if self._validate_price(price):
+            self.websocket_price = price
+            self.update_price_cache(price)
+
     def place_take_profit_order(self, side, price, quantity):
         """挂止盈单"""
         try:

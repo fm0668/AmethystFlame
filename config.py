@@ -25,12 +25,20 @@ class Config:
         self.GRID_SPACING = 0.001  # 网格间距（0.1%）
         self.INITIAL_QUANTITY = 3  # 初始下单数量
         self.LEVERAGE = 15  # 杠杆倍数
+        self.TOTAL_CAPITAL = 300.0  # 总资金（USDC）
         
         # ==================== 风控配置 ====================
         self.POSITION_THRESHOLD = 500  # 持仓阈值，超过此值进入保守模式
         self.POSITION_LIMIT = 200  # 持仓数量阈值
         self.SYNC_TIME = 10  # 同步时间（秒）
         self.ORDER_FIRST_TIME = 10  # 首次挂单间隔时间（秒）
+        
+        # ==================== EMA+ADX 信号配置 ====================
+        self.EMA_SHORT_PERIOD = 20  # 短期EMA周期
+        self.EMA_MEDIUM_PERIOD = 50  # 中期EMA周期
+        self.EMA_LONG_PERIOD = 200  # 长期EMA周期
+        self.ADX_PERIOD = 14  # ADX计算周期
+        self.ADX_THRESHOLD = 25  # ADX强趋势阈值
         
         # ==================== WebSocket 配置 ====================
         self.WEBSOCKET_URL = "wss://fstream.binance.com/ws"
@@ -54,7 +62,10 @@ class Config:
         print(f"网格间距: {self.GRID_SPACING * 100}%")
         print(f"初始数量: {self.INITIAL_QUANTITY}")
         print(f"杠杆倍数: {self.LEVERAGE}x")
+        print(f"总资金: {self.TOTAL_CAPITAL} USDT")
         print(f"持仓阈值: {self.POSITION_THRESHOLD}")
+        print(f"EMA周期: {self.EMA_SHORT_PERIOD}/{self.EMA_MEDIUM_PERIOD}/{self.EMA_LONG_PERIOD}")
+        print(f"ADX配置: 周期{self.ADX_PERIOD}, 阈值{self.ADX_THRESHOLD}")
         print("=" * 50)
 
 # 创建全局配置实例

@@ -4,7 +4,7 @@
 网格交易定时任务调度器
 功能：管理网格交易系统的定时任务，包括每日汇总、数据清理等
 作者：AmethystFlame
-版本：v2.2
+版本：v5.0
 """
 
 import schedule
@@ -58,7 +58,12 @@ class GridScheduler:
                 return
             
             # 获取当前价格和网格配置
-            current_price = self._get_current_price()
+            try:
+                current_price = self._get_current_price()
+            except ValueError as e:
+                self.logger.error(f"获取当前价格失败，跳过汇总任务: {e}")
+                return
+                
             total_capital = self._get_total_capital()
             grid_config = self._get_grid_config()
             
@@ -103,19 +108,51 @@ class GridScheduler:
             self.logger.error(f"每小时备份任务执行失败: {e}")
     
     def _get_current_price(self) -> float:
-        """获取当前价格"""
+        """获取当前价格，带有价格验证和异常处理"""
         try:
             if hasattr(self.grid_strategy, 'exchange'):
                 # 从交易所获取当前价格
                 ticker = self.grid_strategy.exchange.get_ticker()
-                return float(ticker.get('price', 0))
+                price = ticker.get('price', 0)
+                
+                # 价格有效性验证
+                if price and float(price) > 0:
+                    current_price = float(price)
+                    # 保存最后有效价格
+                    if not hasattr(self, '_last_valid_price'):
+                        self._last_valid_price = current_price
+                    else:
+                        # 价格合理性检查：新价格与上次价格差异不超过50%
+                        price_change_ratio = abs(current_price - self._last_valid_price) / self._last_valid_price
+                        if price_change_ratio > 0.5:
+                            self.logger.warning(f"价格变化异常: {self._last_valid_price} -> {current_price}, 变化幅度: {price_change_ratio:.2%}")
+                            # 如果价格变化过大，使用最后有效价格
+                            return self._last_valid_price
+                        else:
+                            self._last_valid_price = current_price
+                    
+                    return current_price
+                else:
+                    # 价格无效，直接抛出异常（不使用fallback）
+                    self.logger.error(f"获取到无效价格: {price}")
+                    raise ValueError(f"无效的价格数据: {price}")
             else:
-                # 如果无法获取实时价格，返回默认值
-                self.logger.warning("无法获取实时价格，使用默认值")
-                return 0.0
+                # 如果无法获取实时价格，抛出异常而不是返回0
+                self.logger.error("网格策略实例未设置exchange，无法获取价格")
+                raise ValueError("无法获取价格：exchange未设置")
+                
+        except ValueError:
+            # ValueError直接重新抛出，不使用fallback
+            raise
         except Exception as e:
             self.logger.error(f"获取当前价格失败: {e}")
-            return 0.0
+            # 只有在非价格验证错误时才使用fallback
+            if hasattr(self, '_last_valid_price') and self._last_valid_price > 0:
+                self.logger.warning(f"价格获取失败，使用最后有效价格: {self._last_valid_price}")
+                return self._last_valid_price
+            else:
+                # 如果连最后有效价格都没有，抛出异常
+                raise ValueError(f"价格获取失败且无有效fallback价格: {e}")
     
     def _get_total_capital(self) -> float:
         """获取总资金"""

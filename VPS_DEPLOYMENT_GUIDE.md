@@ -13,7 +13,7 @@
 
 ssh root@104.234.155.254
 
-ogEOeygir0A1
+wrGgvNOGpoe1
 
 ping 104.234.155.254
 

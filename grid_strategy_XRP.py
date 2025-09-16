@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-网格交易机器人主程序
-模块化重构版本
+XRP网格交易策略 - 主程序
+币安合约网格交易机器人
+模块化重构版本 v5.0
 """
 
 import asyncio
@@ -46,17 +47,20 @@ class GridTradingBot:
         
         # 初始化EMA+ADX信号模块
         self.signal_module = EMAAdxSignalModule(
-            ema_short=config.EMA_SHORT_PERIOD if hasattr(config, 'EMA_SHORT_PERIOD') else 20,
-            ema_medium=config.EMA_MEDIUM_PERIOD if hasattr(config, 'EMA_MEDIUM_PERIOD') else 50,
-            ema_long=config.EMA_LONG_PERIOD if hasattr(config, 'EMA_LONG_PERIOD') else 200,
-            adx_period=config.ADX_PERIOD if hasattr(config, 'ADX_PERIOD') else 14,
-            adx_threshold=config.ADX_THRESHOLD if hasattr(config, 'ADX_THRESHOLD') else 25
+            ema_short=config.EMA_SHORT_PERIOD,
+            ema_medium=config.EMA_MEDIUM_PERIOD,
+            ema_long=config.EMA_LONG_PERIOD,
+            adx_period=config.ADX_PERIOD,
+            adx_threshold=config.ADX_THRESHOLD
         )
         self.last_signal_check_time = 0  # 信号检查时间限速
         
         # WebSocket相关
         self.listen_key = None
         self.last_ticker_update_time = 0  # ticker 时间限速
+        
+        # 添加锁机制用于订单更新处理
+        self.lock = asyncio.Lock()
         
         # 初始化汇总功能
         self.config = config  # 提供配置访问
@@ -102,8 +106,16 @@ class GridTradingBot:
             try:
                 await asyncio.sleep(1800)  # 每30分钟续期一次
                 self.exchange_interface.keep_listen_key_alive(self.listen_key)
+                logger.info("listenKey续期成功")
             except Exception as e:
                 logger.error(f"listenKey续期失败: {e}")
+                # 添加重试机制
+                await asyncio.sleep(60)  # 等待60秒后重试
+                try:
+                    self.exchange_interface.keep_listen_key_alive(self.listen_key)
+                    logger.info("listenKey续期重试成功")
+                except Exception as retry_e:
+                    logger.error(f"listenKey续期重试失败: {retry_e}")
     
     async def monitor_orders(self):
         """监控挂单状态，超过300秒未成交的挂单自动取消"""
@@ -173,10 +185,33 @@ class GridTradingBot:
         try:
             data = json.loads(message)
             
-            # 更新价格信息
-            self.grid_core.best_bid_price = float(data.get('b', 0))
-            self.grid_core.best_ask_price = float(data.get('a', 0))
-            self.grid_core.latest_price = (self.grid_core.best_bid_price + self.grid_core.best_ask_price) / 2
+            # 更新价格信息，添加价格有效性验证
+            best_bid = data.get('b', 0)
+            best_ask = data.get('a', 0)
+            
+            # 验证价格数据的有效性
+            if not best_bid or not best_ask or float(best_bid) <= 0 or float(best_ask) <= 0:
+                logger.warning(f"收到无效的ticker数据: bid={best_bid}, ask={best_ask}")
+                return
+            
+            self.grid_core.best_bid_price = float(best_bid)
+            self.grid_core.best_ask_price = float(best_ask)
+            
+            # 计算中间价并验证合理性
+            new_price = (self.grid_core.best_bid_price + self.grid_core.best_ask_price) / 2
+            
+            # 价格合理性检查
+            if hasattr(self.grid_core, 'latest_price') and self.grid_core.latest_price > 0:
+                price_change_ratio = abs(new_price - self.grid_core.latest_price) / self.grid_core.latest_price
+                if price_change_ratio > 0.1:  # 10%的价格变化阈值
+                    logger.warning(f"价格变化异常: {self.grid_core.latest_price} -> {new_price}, 变化幅度: {price_change_ratio:.2%}")
+                    # 如果价格变化过大，可以选择不更新或使用平滑处理
+                    # 这里选择继续使用新价格，但记录警告
+            
+            self.grid_core.latest_price = new_price
+            
+            # 更新交易所接口的WebSocket价格
+            self.exchange_interface.update_websocket_price(new_price)
             
             # 时间限速，避免过于频繁的处理
             current_time = time.time()
@@ -376,59 +411,135 @@ class GridTradingBot:
     
     async def handle_order_update(self, message):
         """处理挂单更新"""
-        try:
-            data = json.loads(message)
-            order_data = data.get('o', {})
-            
-            # 获取订单信息
-            symbol = order_data.get('s')
-            side = order_data.get('S')  # BUY 或 SELL
-            position_side = order_data.get('ps')  # LONG 或 SHORT
-            order_status = order_data.get('X')  # 订单状态
-            execution_type = order_data.get('x')  # 执行类型
-            
-            # 只处理我们关注的交易对
-            expected_symbol = f"{config.COIN_NAME}{config.CONTRACT_TYPE}"
-            if symbol != expected_symbol:
-                return
-            
-            logger.info(f"订单更新: {side} {position_side} {order_status} {execution_type}")
-            
-            # 如果订单完全成交或取消，更新挂单状态
-            if order_status in ['FILLED', 'CANCELED', 'EXPIRED']:
-                self.grid_core.check_orders_status()
+        async with self.lock:  # 添加锁机制
+            try:
+                data = json.loads(message)
+                order_data = data.get('o', {})
                 
-                # 如果是成交，同步持仓
-                if order_status == 'FILLED':
-                    long_pos, short_pos = self.exchange_interface.get_position()
-                    self.grid_core.long_position = long_pos
-                    self.grid_core.short_position = short_pos
-                    logger.info(f"订单成交，同步持仓: 多头 {long_pos} 张, 空头 {short_pos} 张")
-        
+                # 获取订单信息
+                symbol = order_data.get('s')
+                side = order_data.get('S')  # BUY 或 SELL
+                position_side = order_data.get('ps')  # LONG 或 SHORT
+                order_status = order_data.get('X')  # 订单状态
+                execution_type = order_data.get('x')  # 执行类型
+                quantity = float(order_data.get('q', 0))  # 订单数量
+                filled = float(order_data.get('z', 0))  # 已成交数量
+                remaining = quantity - filled  # 剩余数量
+                
+                # 只处理我们关注的交易对
+                expected_symbol = f"{config.COIN_NAME}{config.CONTRACT_TYPE}"
+                if symbol != expected_symbol:
+                    return
+                
+                logger.info(f"订单更新: {side} {position_side} {order_status} 数量:{quantity} 成交:{filled}")
+                
+                # 详细的订单状态处理
+                if order_status == "NEW":
+                    # 新订单创建时更新挂单数量
+                    self._update_pending_orders(side, position_side, remaining, "add")
+                elif order_status == "FILLED":
+                    # 订单完全成交时更新持仓和挂单
+                    self._update_position_and_orders(side, position_side, filled)
+                elif order_status in ["CANCELED", "EXPIRED"]:
+                    # 订单取消或过期时更新挂单数量
+                    self._update_pending_orders(side, position_side, remaining, "remove")
+                
+                # 如果订单完全成交或取消，更新挂单状态
+                if order_status in ['FILLED', 'CANCELED', 'EXPIRED']:
+                    self.grid_core.check_orders_status()
+                    
+                    # 如果是成交，同步持仓
+                    if order_status == 'FILLED':
+                        long_pos, short_pos = self.exchange_interface.get_position()
+                        self.grid_core.long_position = long_pos
+                        self.grid_core.short_position = short_pos
+                        logger.info(f"订单成交，同步持仓: 多头 {long_pos} 张, 空头 {short_pos} 张")
+            
+            except Exception as e:
+                logger.error(f"处理挂单更新失败: {e}")
+    
+    def _update_pending_orders(self, side, position_side, quantity, action):
+        """更新挂单数量"""
+        try:
+            if action == "add":
+                if side == "BUY" and position_side == "LONG":
+                    self.grid_core.buy_long_orders += quantity
+                elif side == "SELL" and position_side == "LONG":
+                    self.grid_core.sell_long_orders += quantity
+                elif side == "BUY" and position_side == "SHORT":
+                    self.grid_core.buy_short_orders += quantity
+                elif side == "SELL" and position_side == "SHORT":
+                    self.grid_core.sell_short_orders += quantity
+            elif action == "remove":
+                if side == "BUY" and position_side == "LONG":
+                    self.grid_core.buy_long_orders = max(0.0, self.grid_core.buy_long_orders - quantity)
+                elif side == "SELL" and position_side == "LONG":
+                    self.grid_core.sell_long_orders = max(0.0, self.grid_core.sell_long_orders - quantity)
+                elif side == "BUY" and position_side == "SHORT":
+                    self.grid_core.buy_short_orders = max(0.0, self.grid_core.buy_short_orders - quantity)
+                elif side == "SELL" and position_side == "SHORT":
+                    self.grid_core.sell_short_orders = max(0.0, self.grid_core.sell_short_orders - quantity)
         except Exception as e:
-            logger.error(f"处理挂单更新失败: {e}")
+            logger.error(f"更新挂单数量失败: {e}")
+
+    def _update_position_and_orders(self, side, position_side, filled_quantity):
+        """更新持仓和挂单状态"""
+        try:
+            if side == "BUY":
+                if position_side == "LONG":  # 多头开仓单
+                    self.grid_core.long_position += filled_quantity
+                    self.grid_core.buy_long_orders = max(0.0, self.grid_core.buy_long_orders - filled_quantity)
+                elif position_side == "SHORT":  # 空头止盈单
+                    self.grid_core.short_position = max(0.0, self.grid_core.short_position - filled_quantity)
+                    self.grid_core.buy_short_orders = max(0.0, self.grid_core.buy_short_orders - filled_quantity)
+            elif side == "SELL":
+                if position_side == "LONG":  # 多头止盈单
+                    self.grid_core.long_position = max(0.0, self.grid_core.long_position - filled_quantity)
+                    self.grid_core.sell_long_orders = max(0.0, self.grid_core.sell_long_orders - filled_quantity)
+                elif position_side == "SHORT":  # 空头开仓单
+                    self.grid_core.short_position += filled_quantity
+                    self.grid_core.sell_short_orders = max(0.0, self.grid_core.sell_short_orders - filled_quantity)
+        except Exception as e:
+            logger.error(f"更新持仓和挂单状态失败: {e}")
     
     async def connect_websocket(self):
         """连接 WebSocket 并订阅 ticker 和持仓数据"""
-        async with websockets.connect(config.WEBSOCKET_URL) as websocket:
-            # 订阅 ticker 数据
-            await self.subscribe_ticker(websocket)
-            # 订阅挂单数据
-            await self.subscribe_orders(websocket)
-            
-            while True:
-                try:
-                    message = await websocket.recv()
-                    data = json.loads(message)
-                    
-                    if data.get("e") == "bookTicker":
-                        await self.handle_ticker_update(message)
-                    elif data.get("e") == "ORDER_TRADE_UPDATE":
-                        await self.handle_order_update(message)
+        try:
+            # 添加连接超时设置
+            async with websockets.connect(
+                config.WEBSOCKET_URL,
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=10
+            ) as websocket:
+                logger.info("WebSocket 连接成功")
+                await self.subscribe_ticker(websocket)
+                logger.info("已订阅 ticker 数据")
+                await self.subscribe_orders(websocket)
+                logger.info("已订阅订单数据")
+                
+                # 监听消息
+                while True:
+                    try:
+                        message = await websocket.recv()
+                        data = json.loads(message)
                         
-                except Exception as e:
-                    logger.error(f"WebSocket 消息处理失败: {e}")
-                    break
+                        if data.get("e") == "bookTicker":
+                            await self.handle_ticker_update(message)
+                        elif data.get("e") == "ORDER_TRADE_UPDATE":
+                            await self.handle_order_update(message)
+                            
+                    except json.JSONDecodeError as e:
+                        logger.error(f"WebSocket 消息解析失败: {e}")
+                    except Exception as e:
+                        logger.error(f"WebSocket 消息处理失败: {e}")
+                        break
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"WebSocket 连接已关闭: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"WebSocket 连接失败: {e}")
+            raise
     
     def get_recent_trades(self, hours: int = 1):
         """获取最近几小时的交易记录（供调度器使用）"""
