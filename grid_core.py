@@ -292,6 +292,9 @@ class GridCore:
                 if self.long_position < config.POSITION_THRESHOLD:
                     logger.info('如果 long 持仓没到阈值，同步后再次确认！')
                     self.check_orders_status()
+                    # 重新检查订单状态
+                    orders_valid = not (0 < self.buy_long_orders <= self.long_initial_quantity) or \
+                                  not (0 < self.sell_long_orders <= self.long_initial_quantity)
                     if orders_valid:
                         await self.place_long_orders(self.latest_price)
                 else:
@@ -308,6 +311,9 @@ class GridCore:
                 if self.short_position < config.POSITION_THRESHOLD:
                     logger.info('如果 short 持仓没到阈值，同步后再次确认！')
                     self.check_orders_status()
+                    # 重新检查订单状态
+                    orders_valid = not (0 < self.sell_short_orders <= self.short_initial_quantity) or \
+                                  not (0 < self.buy_short_orders <= self.short_initial_quantity)
                     if orders_valid:
                         await self.place_short_orders(self.latest_price)
                 else:
